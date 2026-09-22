@@ -7,6 +7,14 @@ Hoppie is integrated directly, meaning you can use any aircraft with this plugin
 
 ![Image of example notification of contact me](https://github.com/blt950/vPilot-Pushover/assets/2505044/68653e8a-8bca-45d4-8220-4a38f39d68d4)
 
+## Features
+
+- **Relay private messages, radio messages, and SELCAL alerts** to your phone
+- **ACARS/Hoppie messages** — works with any aircraft, no add-on FMS integration needed
+- **Disconnect notice** when you drop off the network
+- **Four notification backends** — Pushover, Telegram, Gotify, or Bark — pick whichever you already use
+- 🆕 **ATC Ahead** — warns you when an online VATSIM controller's estimated coverage area lies ahead of you on your route, before you'd normally expect to hear from them. Works from the public VATSIM data feed alone (no SimConnect, no Navigraph required). See **[ATC_AHEAD.md](ATC_AHEAD.md)** for full setup, all settings, and an honest breakdown of its accuracy limits.
+
 ## Prerequisites
 You need [vPilot](https://vpilot.rosscarlson.dev/) that you use to connect to VATSIM. Then choose one of the following notifiers.
 
@@ -87,6 +95,15 @@ Several message types below take a `Priority` value that controls how urgently t
 ### [Disconnect]
 `Enabled`= Whether or not to send message when disconneted from network. Set to `true` or `false`\
 `Priority` = Notification priority for disconnect messages (see note above). Default `1`
+
+### [AtcAhead] 🆕
+Warns you when an online controller's estimated area lies ahead of you on your route. Off by default. Full details, accuracy notes, and every setting are in **[ATC_AHEAD.md](ATC_AHEAD.md)** — quick summary:\
+`Enabled` = Master switch. Set to `true` or `false`. Default `false`\
+`DistanceNm` = Alert once a controller's area is within this many NM ahead. Default `150`\
+`PollIntervalSeconds` = How often to poll the public VATSIM data feed. Default `30`\
+`NotifyOnce` = One alert per controller logon if `true`, otherwise repeats per `CooldownMinutes`. Default `true`\
+`Facilities` = Comma list of facility types to watch, from `DEL,GND,TWR,APP,DEP,CTR,FSS`. Default `CTR,FSS`\
+`TestOnConnect` = Sends one sample alert right after connecting, to confirm it's working. Default `false`
 
 <details>
 <summary><strong>Advanced Options</strong></summary> 
