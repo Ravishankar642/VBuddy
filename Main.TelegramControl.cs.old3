@@ -1,0 +1,480 @@
+// Main.TelegramControl.cs
+//
+// Adds two-way Telegram control to VBuddy:
+//   * /connect, /disconnect, /msg, /status, /help commands sent from Telegram
+//   * broadcast messages and connect notices relayed to Telegram
+//   * remembers the last callsign / aircraft type / SELCAL so /connect works with no arguments
+//
+// Private / radio / SELCAL / disconnect / Hoppie relaying is already handled by
+// VBuddy's existing notifier, so it is intentionally NOT duplicated here.
+//
+// Hook-up: add ONE line, `InitTelegramControl();`, in Main.Initialize() right after
+// `InitAtcAhead();`. Everything else lives in this file.
+//
+// Written against the vPilot plugin SDK (RossCarlson.Vatsim.Vpilot.Plugins.xml in the repo):
+// IBroker.RequestConnect / RequestDisconnect / SendPrivateMessage, and the
+// AlreadyConnected / SimNotReady / NotConnected exceptions.
+//
+// Needs no new package references (hand-rolled JSON parser at the bottom).
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using RossCarlson.Vatsim.Vpilot.Plugins;
+using RossCarlson.Vatsim.Vpilot.Plugins.Events;
+using RossCarlson.Vatsim.Vpilot.Plugins.Exceptions;
+
+namespace VBuddy {
+
+    public partial class Main {
+
+        private TelegramControl _tgControl;
+
+        private void InitTelegramControl() {
+            try {
+                var ini = new IniFile(Path.Combine(_pluginDir, "VBuddy.ini"));
+                var s = TelegramControlSettings.Load(ini);
+                if (!s.Enabled) return;
+
+                if (!s.IsValid) {
+                    SendDebug("[TelegramControl] Enabled, but BotToken or ChatId is missing/invalid. " +
+                              "Set them under [Telegram] (or [TelegramControl]) in VBuddy.ini.");
+                    return;
+                }
+
+                _tgControl = new TelegramControl(s, _vPilot, _uiContext, SendDebug, _pluginDir);
+                _tgControl.Start();
+                SendDebug("[TelegramControl] Started. Send /help to your bot.");
+            } catch (Exception ex) {
+                SendDebug("[TelegramControl] Failed to start: " + ex.Message);
+            }
+        }
+    }
+
+    internal sealed class TelegramControlSettings {
+        public bool Enabled;
+        public string BotToken;
+        public long ChatId;
+        public bool RelayBroadcast = true;
+        public bool NotifyConnect = true;
+        public bool NotifyDisconnect;   // off by default: [Disconnect] + your driver already does this
+
+        public bool IsValid {
+            get { return !string.IsNullOrWhiteSpace(BotToken) && ChatId != 0; }
+        }
+
+        public static TelegramControlSettings Load(IniFile ini) {
+            var s = new TelegramControlSettings();
+            s.Enabled = ReadBool(ini, "Enabled", false);
+            s.RelayBroadcast = ReadBool(ini, "RelayBroadcast", true);
+            s.NotifyConnect = ReadBool(ini, "NotifyConnect", true);
+            s.NotifyDisconnect = ReadBool(ini, "NotifyDisconnect", false);
+
+            // Reuse the existing [Telegram] credentials unless overridden in [TelegramControl].
+            s.BotToken = Clean(ini.Read("BotToken", "TelegramControl", null)) ?? Clean(ini.Read("BotToken", "Telegram", null));
+            string chat = Clean(ini.Read("ChatId", "TelegramControl", null)) ?? Clean(ini.Read("ChatId", "Telegram", null));
+            long id;
+            if (chat != null && long.TryParse(chat, NumberStyles.Integer, CultureInfo.InvariantCulture, out id)) s.ChatId = id;
+            return s;
+        }
+
+        private static string Clean(string v) {
+            if (v == null) return null;
+            v = v.Trim().Trim('"').Trim();
+            return v.Length == 0 ? null : v;
+        }
+
+        private static bool ReadBool(IniFile ini, string key, bool def) {
+            string v = Clean(ini.Read(key, "TelegramControl", null));
+            bool b;
+            return v != null && bool.TryParse(v, out b) ? b : def;
+        }
+    }
+
+    internal sealed class TelegramControl {
+
+        // Own client: long-polling needs a timeout longer than the 25 s poll window.
+        private static readonly HttpClient Client = new HttpClient { Timeout = TimeSpan.FromSeconds(40) };
+
+        private readonly TelegramControlSettings _s;
+        private readonly IBroker _broker;
+        private readonly SynchronizationContext _ui;
+        private readonly Action<string> _log;
+        private readonly string _identityPath;
+        private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+
+        private long _offset;
+        private volatile bool _connected;
+        private string _callsign = "";
+        private string _lastCallsign = "", _lastType = "", _lastSelcal = "";
+        private bool _conflictLogged;
+
+        public TelegramControl(TelegramControlSettings s, IBroker broker, SynchronizationContext ui,
+                               Action<string> log, string pluginDir) {
+            _s = s;
+            _broker = broker;
+            _ui = ui;
+            _log = log;
+            _identityPath = Path.Combine(pluginDir, "VBuddy.identity");
+        }
+
+        public void Start() {
+            LoadIdentity();
+            _broker.NetworkConnected += OnConnected;
+            _broker.NetworkDisconnected += OnDisconnected;
+            if (_s.RelayBroadcast) _broker.BroadcastMessageReceived += OnBroadcast;
+            _broker.SessionEnded += (sender, e) => Stop();
+            _log("[TelegramControl] UI context: " + (_ui != null ? "captured" : "none (using main window fallback)"));
+            Task.Run(() => PollLoop(_cts.Token));
+        }
+
+        public void Stop() {
+            try { _cts.Cancel(); } catch { }
+        }
+
+        // -------------------------------------------------- vPilot -> Telegram
+
+        private void OnConnected(object sender, NetworkConnectedEventArgs e) {
+            _connected = true;
+            _callsign = e.Callsign ?? "";
+            if (!string.IsNullOrEmpty(e.Callsign)) {
+                _lastCallsign = e.Callsign;
+                _lastType = e.TypeCode ?? "";
+                _lastSelcal = e.SelcalCode ?? "";
+                SaveIdentity();
+            }
+            if (_s.NotifyConnect) {
+                string type = string.IsNullOrEmpty(e.TypeCode) ? "" : " (" + e.TypeCode + ")";
+                _ = SendAsync("\u2705 Connected to VATSIM as " + _callsign + type + (e.ObserverMode ? " [observer]" : ""));
+            }
+        }
+
+        private void OnDisconnected(object sender, EventArgs e) {
+            _connected = false;
+            _callsign = "";
+            if (_s.NotifyDisconnect) _ = SendAsync("\u274C Disconnected from VATSIM.");
+        }
+
+        private void OnBroadcast(object sender, BroadcastMessageReceivedEventArgs e) {
+            _ = SendAsync("\uD83D\uDCE2 Broadcast from " + e.From + ":\n" + e.Message);
+        }
+
+        // -------------------------------------------------- Telegram -> vPilot
+
+        private string Api(string method) {
+            return "https://api.telegram.org/bot" + _s.BotToken + "/" + method;
+        }
+
+        private string Scrub(string text) {
+            return string.IsNullOrEmpty(text) ? text : text.Replace(_s.BotToken, "***");
+        }
+
+        private async Task PollLoop(CancellationToken ct) {
+            // Discard anything queued while vPilot was closed, so a stale "/disconnect"
+            // can never fire at startup.
+            try { await FlushBacklog(ct); } catch { }
+
+            _log("[TelegramControl] Listening for Telegram commands (chat id " + _s.ChatId + ").");
+            await SendAsync("VBuddy Telegram control is online. Send /help for commands.");
+
+            while (!ct.IsCancellationRequested) {
+                try {
+                    string url = Api("getUpdates") + "?timeout=25&offset=" + _offset +
+                                 "&allowed_updates=%5B%22message%22%5D";
+                    using (var resp = await Client.GetAsync(url, ct)) {
+                        string body = await resp.Content.ReadAsStringAsync();
+
+                        if (!resp.IsSuccessStatusCode) {
+                            if ((int)resp.StatusCode == 409 && !_conflictLogged) {
+                                _conflictLogged = true;
+                                _log("[TelegramControl] Telegram returned 409: another program is already " +
+                                     "polling this bot (or a webhook is set). Use a dedicated bot for VBuddy.");
+                            } else if ((int)resp.StatusCode != 409) {
+                                _log("[TelegramControl] getUpdates failed: HTTP " + (int)resp.StatusCode);
+                            }
+                            await Task.Delay(10000, ct);
+                            continue;
+                        }
+                        _conflictLogged = false;
+                        await ProcessUpdates(body);
+                    }
+                } catch (OperationCanceledException) {
+                    if (ct.IsCancellationRequested) return;      // shutting down
+                    // otherwise just an HTTP timeout; loop again
+                } catch (Exception ex) {
+                    _log("[TelegramControl] Poll error: " + Scrub(ex.Message));
+                    try { await Task.Delay(5000, ct); } catch { return; }
+                }
+            }
+        }
+
+        private async Task FlushBacklog(CancellationToken ct) {
+            using (var resp = await Client.GetAsync(Api("getUpdates") + "?offset=-1&timeout=0", ct)) {
+                var root = MiniJson.Parse(await resp.Content.ReadAsStringAsync()) as Dictionary<string, object>;
+                var list = MiniJson.Get(root, "result") as List<object>;
+                if (list == null || list.Count == 0) return;
+                var last = list[list.Count - 1] as Dictionary<string, object>;
+                long id = MiniJson.ToLong(MiniJson.Get(last, "update_id"));
+                if (id >= _offset) _offset = id + 1;
+            }
+        }
+
+        private async Task ProcessUpdates(string json) {
+            var root = MiniJson.Parse(json) as Dictionary<string, object>;
+            var list = MiniJson.Get(root, "result") as List<object>;
+            if (list == null) return;
+
+            foreach (object item in list) {
+                var upd = item as Dictionary<string, object>;
+                if (upd == null) continue;
+
+                long id = MiniJson.ToLong(MiniJson.Get(upd, "update_id"));
+                if (id >= _offset) _offset = id + 1;
+
+                var msg = MiniJson.Get(upd, "message") as Dictionary<string, object>;
+                var chat = MiniJson.Get(msg, "chat") as Dictionary<string, object>;
+                string text = MiniJson.Get(msg, "text") as string;
+                if (chat == null || text == null) continue;
+
+                // Only ever obey the configured chat. Strangers who find the bot get no reply at all.
+                long fromChat = MiniJson.ToLong(MiniJson.Get(chat, "id"));
+                if (fromChat != _s.ChatId) {
+                    // Stays silent in Telegram, but tells YOU in the vPilot debug window why.
+                    _log("[TelegramControl] Ignored a message from chat id " + fromChat +
+                         " because your ChatId in VBuddy.ini is " + _s.ChatId + ".");
+                    continue;
+                }
+
+                _log("[TelegramControl] Received: " + text);
+                string reply = await HandleCommand(text.Trim());
+                if (!string.IsNullOrEmpty(reply)) await SendAsync(reply);
+            }
+        }
+
+        private async Task<string> HandleCommand(string text) {
+            if (!text.StartsWith("/")) return null;
+
+            string[] parts = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            string cmd = parts[0].ToLowerInvariant();
+            int at = cmd.IndexOf('@');
+            if (at > 0) cmd = cmd.Substring(0, at);              // "/status@MyBot" form used in groups
+
+            switch (cmd) {
+                case "/start":
+                case "/help":
+                    return "VBuddy commands:\n" +
+                           "/status\n" +
+                           "/connect  (reuses last callsign/aircraft)\n" +
+                           "/connect CALLSIGN TYPECODE [SELCAL]\n" +
+                           "/disconnect\n" +
+                           "/msg CALLSIGN message text";
+
+                case "/status":
+                    if (_connected) return "Connected to VATSIM as " + _callsign + ".";
+                    return "Not connected. Last identity: " +
+                           (_lastCallsign == "" ? "(none saved)" : _lastCallsign + " / " + _lastType);
+
+                case "/connect": {
+                    if (_connected) return "You're already connected to the network.";
+                    string cs = parts.Length > 1 ? parts[1].ToUpperInvariant() : _lastCallsign;
+                    string tc = parts.Length > 2 ? parts[2].ToUpperInvariant() : _lastType;
+                    string sc = parts.Length > 3 ? parts[3].ToUpperInvariant() : _lastSelcal;
+                    if (string.IsNullOrEmpty(cs) || string.IsNullOrEmpty(tc))
+                        return "Usage: /connect CALLSIGN TYPECODE [SELCAL]\n" +
+                               "(or connect once from the vPilot window so it can be remembered)";
+                    return await OnUi(() => {
+                        _broker.RequestConnect(cs, tc, sc ?? "");
+                        return "Connecting as " + cs + " (" + tc + ")...";
+                    });
+                }
+
+                case "/disconnect":
+                    if (!_connected) return "You're already disconnected from the network.";
+                    return await OnUi(() => {
+                        _broker.RequestDisconnect();
+                        return "Disconnect requested.";
+                    });
+
+                case "/msg":
+                case "/message": {
+                    string[] p = text.Split(new[] { ' ' }, 3, StringSplitOptions.RemoveEmptyEntries);
+                    if (p.Length < 3 || p[2].Trim().Length == 0) return "Usage: /msg CALLSIGN message text";
+                    string to = p[1].ToUpperInvariant();
+                    string body = p[2].Trim();
+                    return await OnUi(() => {
+                        _broker.SendPrivateMessage(to, body);
+                        return "Sent to " + to + ".";
+                    });
+                }
+
+                default:
+                    return "Unknown command. Try /help";
+            }
+        }
+
+        // Runs vPilot calls on the UI thread and turns SDK exceptions into readable replies.
+        private Task<string> OnUi(Func<string> action) {
+            var tcs = new TaskCompletionSource<string>();
+            Action run = () => {
+                try { tcs.SetResult(action()); }
+                catch (AlreadyConnectedException) { tcs.SetResult("You're already connected to the network."); }
+                catch (NotConnectedException) { tcs.SetResult("You're not connected to the network."); }
+                catch (SimNotReadyException) { tcs.SetResult("vPilot isn't connected to the simulator yet."); }
+                catch (Exception ex) {
+                    _log("[TelegramControl] Command failed: " + ex);
+                    tcs.SetResult("Request failed: " + ex.Message);
+                }
+            };
+            if (_ui != null) {
+                _ui.Post(_ => run(), null);
+            } else {
+                var forms = System.Windows.Forms.Application.OpenForms;
+                var main = forms.Count > 0 ? forms[0] : null;
+                if (main != null && main.IsHandleCreated) main.BeginInvoke(run);
+                else run();
+            }
+            return tcs.Task;
+        }
+
+        // -------------------------------------------------- helpers
+
+        private async Task SendAsync(string text) {
+            try {
+                if (text.Length > 4000) text = text.Substring(0, 4000) + "...";
+                var form = new FormUrlEncodedContent(new[] {
+                    new KeyValuePair<string, string>("chat_id", _s.ChatId.ToString(CultureInfo.InvariantCulture)),
+                    new KeyValuePair<string, string>("text", text)
+                });
+                using (var resp = await Client.PostAsync(Api("sendMessage"), form)) {
+                    if (!resp.IsSuccessStatusCode) {
+                        var err = MiniJson.Parse(await resp.Content.ReadAsStringAsync()) as Dictionary<string, object>;
+                        string why = MiniJson.Get(err, "description") as string;
+                        _log("[TelegramControl] sendMessage failed: HTTP " + (int)resp.StatusCode +
+                             (why != null ? " - " + Scrub(why) : "") +
+                             " (401 = wrong BotToken, 400 'chat not found' = wrong ChatId or you never pressed Start on the bot)");
+                    }
+                }
+            } catch (Exception ex) {
+                _log("[TelegramControl] Send error: " + Scrub(ex.Message));
+            }
+        }
+
+        private void SaveIdentity() {
+            try { File.WriteAllLines(_identityPath, new[] { _lastCallsign, _lastType, _lastSelcal }); }
+            catch { }
+        }
+
+        private void LoadIdentity() {
+            try {
+                if (!File.Exists(_identityPath)) return;
+                string[] l = File.ReadAllLines(_identityPath);
+                if (l.Length > 0) _lastCallsign = l[0];
+                if (l.Length > 1) _lastType = l[1];
+                if (l.Length > 2) _lastSelcal = l[2];
+            } catch { }
+        }
+    }
+
+    // Minimal JSON reader: objects -> Dictionary, arrays -> List, numbers -> long/double,
+    // strings, bool, null. Enough for Telegram's API responses; avoids extra references.
+    internal static class MiniJson {
+
+        public static object Parse(string s) {
+            int i = 0;
+            return ParseValue(s, ref i);
+        }
+
+        public static object Get(Dictionary<string, object> d, string key) {
+            object v;
+            return d != null && d.TryGetValue(key, out v) ? v : null;
+        }
+
+        public static long ToLong(object o) {
+            if (o is long) return (long)o;
+            if (o is double) return (long)(double)o;
+            return 0;
+        }
+
+        private static void Ws(string s, ref int i) {
+            while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+        }
+
+        private static object ParseValue(string s, ref int i) {
+            Ws(s, ref i);
+            char c = s[i];
+
+            if (c == '{') {
+                i++;
+                var d = new Dictionary<string, object>();
+                Ws(s, ref i);
+                if (s[i] == '}') { i++; return d; }
+                while (true) {
+                    Ws(s, ref i);
+                    string key = ParseString(s, ref i);
+                    Ws(s, ref i);
+                    i++;                                   // ':'
+                    d[key] = ParseValue(s, ref i);
+                    Ws(s, ref i);
+                    if (s[i] == ',') { i++; continue; }
+                    i++;                                   // '}'
+                    return d;
+                }
+            }
+            if (c == '[') {
+                i++;
+                var list = new List<object>();
+                Ws(s, ref i);
+                if (s[i] == ']') { i++; return list; }
+                while (true) {
+                    list.Add(ParseValue(s, ref i));
+                    Ws(s, ref i);
+                    if (s[i] == ',') { i++; continue; }
+                    i++;                                   // ']'
+                    return list;
+                }
+            }
+            if (c == '"') return ParseString(s, ref i);
+            if (string.CompareOrdinal(s, i, "true", 0, 4) == 0) { i += 4; return true; }
+            if (string.CompareOrdinal(s, i, "false", 0, 5) == 0) { i += 5; return false; }
+            if (string.CompareOrdinal(s, i, "null", 0, 4) == 0) { i += 4; return null; }
+
+            int start = i;
+            while (i < s.Length && "+-0123456789.eE".IndexOf(s[i]) >= 0) i++;
+            string num = s.Substring(start, i - start);
+            long l;
+            if (long.TryParse(num, NumberStyles.Integer, CultureInfo.InvariantCulture, out l)) return l;
+            double dbl;
+            double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out dbl);
+            return dbl;
+        }
+
+        private static string ParseString(string s, ref int i) {
+            var sb = new StringBuilder();
+            i++;                                           // opening quote
+            while (i < s.Length && s[i] != '"') {
+                char c = s[i++];
+                if (c != '\\') { sb.Append(c); continue; }
+                char e = s[i++];
+                switch (e) {
+                    case 'n': sb.Append('\n'); break;
+                    case 'r': sb.Append('\r'); break;
+                    case 't': sb.Append('\t'); break;
+                    case 'b': sb.Append('\b'); break;
+                    case 'f': sb.Append('\f'); break;
+                    case 'u':
+                        sb.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
+                        i += 4;
+                        break;
+                    default: sb.Append(e); break;          // \" \\ \/
+                }
+            }
+            i++;                                           // closing quote
+            return sb.ToString();
+        }
+    }
+}

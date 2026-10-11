@@ -5,12 +5,9 @@ using System.Net.Http;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
-
 using Microsoft.Win32;
-
 using RossCarlson.Vatsim.Vpilot.Plugins;
 using RossCarlson.Vatsim.Vpilot.Plugins.Events;
-
 using VBuddy.Atc;
 using VBuddy.Notifications;
 
@@ -124,6 +121,7 @@ namespace VBuddy {
         public void Initialize(IBroker broker) {
             _vPilot = broker;
             _uiContext = SynchronizationContext.Current;
+
             LoadSettings();
 
             if (!_settingsLoaded) {
@@ -137,6 +135,7 @@ namespace VBuddy {
             }
 
             _notifier = factory(_settings, ReportSendFailure);
+
             if (!_notifier.HasValidConfig()) {
                 ReportLoadFailure($"{_settings.Driver} configuration is invalid. Check your VBuddy.ini");
                 return;
@@ -159,6 +158,9 @@ namespace VBuddy {
 
             // Optional ATC Ahead feature (off unless [AtcAhead] Enabled=true)
             InitAtcAhead();
+
+            // Optional Telegram two-way control (off unless [TelegramControl] Enabled=true)
+            InitTelegramControl();
 
             if (!_settings.SilentStartupEnabled)
             {
@@ -187,7 +189,6 @@ namespace VBuddy {
         // persistent problem can't spam a modal on every message.
         private void ReportSendFailure(string message) {
             SendDebug($"[Send Error] {message}");
-
             if (_sendErrorShown) return;
             _sendErrorShown = true;
 
@@ -200,23 +201,18 @@ namespace VBuddy {
 
         private void OnNetworkConnected(object sender, NetworkConnectedEventArgs e) {
             ConnectedCallsign = e.Callsign;
-
             if (_settings.HoppieEnabled) {
                 _acars.Start();
             }
-
             AtcAheadOnConnected(e.Callsign);
         }
 
         private void OnNetworkDisconnected(object sender, EventArgs e) {
             ConnectedCallsign = null;
-
             if (_settings.HoppieEnabled) {
                 _acars.Stop();
             }
-
             AtcAheadOnDisconnected();
-
             if (_settings.DisconnectEnabled) {
                 _ = _notifier.SendMessageAsync("Disconnected from network", "vPilot", _settings.DisconnectPriority, "disconnect message (Disconnect)");
             }
@@ -245,6 +241,7 @@ namespace VBuddy {
 
                 string vPilotPath = (string)registryKey.GetValue("Install_Dir");
                 string configFile = Path.Combine(vPilotPath, "Plugins", "VBuddy.ini");
+
                 var ini = new IniFile(configFile);
 
                 _settings = new PluginSettings {
@@ -268,7 +265,6 @@ namespace VBuddy {
                     BarkUrl = ini.Read("Url", "Bark", null),
                     BarkKey = ini.Read("Key", "Bark", null),
                     BarkNotificationGroup = ini.Read("NotificationGroup", "Bark", null),
-
                     PrivatePriority = ParseInt(ini.Read("Priority", "RelayPrivate", null), 1),
                     RadioPriority = ParseInt(ini.Read("Priority", "RelayRadio", null), 1),
                     SelcalPriority = ParseInt(ini.Read("Priority", "RelaySelcal", null), 1),
@@ -308,9 +304,9 @@ namespace VBuddy {
 
         private async Task CheckForUpdatesAsync() {
             if (string.IsNullOrEmpty(UpdateCheckUrl)) return;
+
             try {
                 HttpResponseMessage response = await Http.Client.GetAsync(UpdateCheckUrl);
-
                 if (!response.IsSuccessStatusCode) {
                     SendDebug($"[Update Checker] HttpResponse request failed with status code: {response.StatusCode}");
                     return;
@@ -329,6 +325,5 @@ namespace VBuddy {
                 SendDebug($"[Update Checker] An HttpResponse error occurred: {ex.Message}");
             }
         }
-
     }
 }

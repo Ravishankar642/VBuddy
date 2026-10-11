@@ -1,80 +1,47 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Replacement for the original VBuddy.csproj so the plugin can be built with:
+        dotnet build VBuddy.csproj -c Release
+    Output: bin\Release\VBuddy.dll
+
+    All .cs files in this folder (including Main.TelegramControl.cs) are included
+    automatically - no list to maintain.
+
+    ONLY THING YOU MAY NEED TO EDIT: the HintPath below, if vPilot is not installed
+    in %LocalAppData%\vPilot.
+  -->
+
   <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{22722C7C-A26E-4BCA-BB97-442C958C7E5E}</ProjectGuid>
-    <OutputType>Library</OutputType>
-    <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>VBuddy</RootNamespace>
+    <TargetFramework>net48</TargetFramework>
     <AssemblyName>VBuddy</AssemblyName>
-    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
+    <RootNamespace>VBuddy</RootNamespace>
+    <OutputType>Library</OutputType>
+    <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup>
     <SignAssembly>false</SignAssembly>
+    <!-- The repo already has Properties\AssemblyInfo.cs; don't generate a second one. -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <!-- Put the DLL in bin\Release\ instead of bin\Release\net48\ -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
+
   <ItemGroup>
-    <Reference Include="RossCarlson.Vatsim.Vpilot.Plugins, Version=3.9.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>F:\VATSIM\vPilot\RossCarlson.Vatsim.Vpilot.Plugins.dll</HintPath>
+    <!-- vPilot's own plugin SDK. Private=False stops it being copied next to VBuddy.dll
+         (a copy of this file inside the Plugins folder breaks vPilot plugins). -->
+    <Reference Include="RossCarlson.Vatsim.Vpilot.Plugins">
+      <HintPath>$(LOCALAPPDATA)\vPilot\RossCarlson.Vatsim.Vpilot.Plugins.dll</HintPath>
+      <Private>False</Private>
     </Reference>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
+
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
-    <Reference Include="System.Xml" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
-  <ItemGroup>
-    <Compile Include="Acars.cs" />
-    <Compile Include="Atc\AtcAheadService.cs" />
-    <Compile Include="Atc\AtcAheadSettings.cs" />
-    <Compile Include="Atc\BoundaryStore.cs" />
-    <Compile Include="Atc\GeoMath.cs" />
-    <Compile Include="Atc\RoutePlanner.cs" />
-    <Compile Include="Atc\VatsimFeed.cs" />
-    <Compile Include="ISoundNotifier.cs" />
-    <Compile Include="Main.AtcAhead.cs" />
-    <Compile Include="Drivers\HttpNotifierBase.cs" />
-    <Compile Include="Drivers\Gotify.cs" />
-    <Compile Include="Drivers\Pushover.cs" />
-    <Compile Include="Drivers\Telegram.cs" />
-    <Compile Include="Drivers\Bark.cs" />
-    <Compile Include="Http.cs" />
-    <Compile Include="IniFile.cs" />
-    <Compile Include="INotifier.cs" />
-    <Compile Include="NotifierConfig.cs" />
-    <Compile Include="Main.cs" />
-    <Compile Include="Notifications\ErrorNotifier.cs" />
-    <Compile Include="Properties\AssemblyInfo.cs" />
-  </ItemGroup>
-  <ItemGroup>
-    <Content Include="RossCarlson.Vatsim.Vpilot.Plugins.xml" />
-  </ItemGroup>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+
 </Project>

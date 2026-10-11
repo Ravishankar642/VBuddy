@@ -1,0 +1,390 @@
+// SimLink.cs  -  optional live telemetry and control via SimConnect.
+//
+// This file is deliberately isolated: nothing else in VBuddy touches the native SimConnect API.
+// If SimConnect.dll is missing, is the wrong bitness, or the simulator is closed, SimLinkHost.TryCreate
+// returns null (it never throws) and VBuddy simply runs without telemetry.
+//
+// It talks to the native SimConnect.dll directly (no reference to Microsoft.FlightSimulator.SimConnect.dll
+// and no window handle needed), so the project builds without the MSFS SDK installed.
+// Works with Microsoft Flight Simulator 2020 and 2024.
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace VBuddy {
+
+    internal struct SimSample {
+        public DateTime Utc;
+        // ---- core (always delivered)
+        public double AltFt;        // PLANE ALTITUDE (MSL)
+        public double GsKt;         // GPS GROUND SPEED
+        public bool OnGround;       // SIM ON GROUND
+        public double VsFpm;        // VERTICAL SPEED
+        public double Lat, Lon;     // PLANE LATITUDE / LONGITUDE
+        public double AglFt;        // PLANE ALT ABOVE GROUND
+        public double TouchdownFps; // PLANE TOUCHDOWN NORMAL VELOCITY (latched by the sim at touchdown)
+        public double HdgTrue;      // PLANE HEADING DEGREES TRUE
+        // ---- extended (HasExt is false if the simulator didn't deliver them)
+        public bool HasExt;
+        public double FuelLbs;      // FUEL TOTAL QUANTITY WEIGHT
+        public double FuelFlowPph;  // sum of ENG FUEL FLOW PPH 1-4
+        public int EnginesRunning;  // bit mask, bit 0 = engine 1 ...
+        public int NumEngines;
+        public bool Stall, Overspeed;
+        public bool GearDown, GearRetractable;
+        public int FlapsIndex;
+        public double QnhHpa, WindDir, WindKt, TempC;
+        public double Com1Mhz, Com2Mhz;
+        public bool ParkingBrake;
+        public double IasKt;
+    }
+
+    internal static class SimLinkHost {
+
+        // Never throws. Returns null when SimConnect can't be used.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static SimLink TryCreate(string dllPath, string pluginDir, Action<string> log, Action<SimSample> onSample) {
+            try {
+                var link = new SimLink(dllPath, pluginDir, log, onSample);
+                link.Start();
+                return link;
+            } catch (DllNotFoundException) {
+                log("[SimConnect] SimConnect.dll was not found. Install the MSFS SDK, or copy SimConnect.dll next to VBuddy.dll " +
+                    "(or set DllPath under [SimConnect] in VBuddy.ini). Telemetry is off.");
+            } catch (EntryPointNotFoundException ex) {
+                log("[SimConnect] This SimConnect.dll is missing an expected function: " + ex.Message + ". Telemetry is off.");
+            } catch (BadImageFormatException) {
+                log("[SimConnect] SimConnect.dll has the wrong bitness for vPilot (32-bit vs 64-bit). Telemetry is off.");
+            } catch (TypeLoadException ex) {
+                log("[SimConnect] Unavailable (type load failed): " + ex.Message);
+            } catch (Exception ex) {
+                log("[SimConnect] Could not start: " + ex.Message + ". Telemetry is off.");
+            }
+            return null;
+        }
+    }
+
+    internal sealed class SimLink : IDisposable {
+
+        private const uint CoreDef = 1, CoreReq = 1, ExtDef = 2, ExtReq = 2, Unused = 0xFFFFFFFF;
+        private const uint PeriodSimFrame = 3, PeriodSecond = 4;
+        private const uint TypeFloat64 = 4;
+        private const int RecvException = 1, RecvQuit = 3, RecvEvent = 4, RecvSimObjectData = 8;
+        private const uint EvPause = 200, EvCrashed = 201;
+
+        // The order here is the order of the doubles in the reply.
+        private static readonly string[][] CoreVars = {
+            new[] { "PLANE ALTITUDE", "feet" },
+            new[] { "GPS GROUND SPEED", "knots" },
+            new[] { "SIM ON GROUND", "bool" },
+            new[] { "VERTICAL SPEED", "feet per minute" },
+            new[] { "PLANE LATITUDE", "degrees" },
+            new[] { "PLANE LONGITUDE", "degrees" },
+            new[] { "PLANE ALT ABOVE GROUND", "feet" },
+            new[] { "PLANE TOUCHDOWN NORMAL VELOCITY", "feet per second" },
+            new[] { "PLANE HEADING DEGREES TRUE", "degrees" }
+        };
+
+        // Requested separately, so if the simulator rejects one of these the core telemetry still works.
+        private static readonly string[][] ExtVars = {
+            new[] { "FUEL TOTAL QUANTITY WEIGHT", "pounds" },          // 0
+            new[] { "ENG FUEL FLOW PPH:1", "pounds per hour" },        // 1
+            new[] { "ENG FUEL FLOW PPH:2", "pounds per hour" },
+            new[] { "ENG FUEL FLOW PPH:3", "pounds per hour" },
+            new[] { "ENG FUEL FLOW PPH:4", "pounds per hour" },        // 4
+            new[] { "GENERAL ENG COMBUSTION:1", "bool" },              // 5
+            new[] { "GENERAL ENG COMBUSTION:2", "bool" },
+            new[] { "GENERAL ENG COMBUSTION:3", "bool" },
+            new[] { "GENERAL ENG COMBUSTION:4", "bool" },              // 8
+            new[] { "STALL WARNING", "bool" },                         // 9
+            new[] { "OVERSPEED WARNING", "bool" },                     // 10
+            new[] { "GEAR HANDLE POSITION", "bool" },                  // 11
+            new[] { "IS GEAR RETRACTABLE", "bool" },                   // 12
+            new[] { "FLAPS HANDLE INDEX", "number" },                  // 13
+            new[] { "SEA LEVEL PRESSURE", "millibars" },               // 14
+            new[] { "AMBIENT WIND DIRECTION", "degrees" },             // 15
+            new[] { "AMBIENT WIND VELOCITY", "knots" },                // 16
+            new[] { "AMBIENT TEMPERATURE", "celsius" },                // 17
+            new[] { "COM ACTIVE FREQUENCY:1", "MHz" },                 // 18
+            new[] { "COM ACTIVE FREQUENCY:2", "MHz" },                 // 19
+            new[] { "NUMBER OF ENGINES", "number" },                   // 20
+            new[] { "BRAKE PARKING POSITION", "bool" },                // 21
+            new[] { "AIRSPEED INDICATED", "knots" }                    // 22
+        };
+
+        // Key events we can send (name -> client event id).
+        private static readonly string[] EventNames = {
+            "COM_RADIO_SET_HZ", "COM2_RADIO_SET_HZ", "COM_STBY_RADIO_SET_HZ", "COM2_STBY_RADIO_SET_HZ",
+            "COM_STBY_RADIO_SWAP", "COM2_RADIO_SWAP", "XPNDR_SET"
+        };
+        private const uint EventBaseId = 100;
+
+        private readonly string _dllPath, _dir;
+        private readonly Action<string> _log;
+        private readonly Action<SimSample> _onSample;
+        private readonly ManualResetEvent _stopEvt = new ManualResetEvent(false);
+        private readonly ConcurrentQueue<KeyValuePair<uint, uint>> _outbox = new ConcurrentQueue<KeyValuePair<uint, uint>>();
+        private Thread _thread;
+        private IntPtr _h = IntPtr.Zero;
+        private volatile bool _connected, _stop;
+        private bool _fast, _loggedWaiting, _extWarned;
+        private DateTime _connectedUtc;
+        private double[] _ext;
+        private DateTime _extUtc = DateTime.MinValue;
+
+        /// <summary>Raised ~5 times a second while connected (used for timers such as the pause alert).</summary>
+        public event Action Tick;
+        /// <summary>Simulator notifications: "Pause" (data 1/0), "Crashed", "Quit".</summary>
+        public event Action<string, uint> SimEvent;
+
+        public bool Connected { get { return _connected; } }
+
+        public SimLink(string dllPath, string pluginDir, Action<string> log, Action<SimSample> onSample) {
+            _dllPath = dllPath; _dir = pluginDir; _log = log; _onSample = onSample;
+        }
+
+        public void Start() {
+            PreloadNative();
+            TryOpen();        // first native call: a missing/incompatible DLL throws here and is handled by the host
+            _thread = new Thread(Loop) { IsBackground = true, Name = "VBuddy-SimLink" };
+            _thread.Start();
+        }
+
+        public void Dispose() {
+            _stop = true;
+            try { _stopEvt.Set(); } catch { }
+            try { if (_thread != null) _thread.Join(1500); } catch { }
+            try { Disconnect(false); } catch { }
+        }
+
+        /// <summary>Queues a key event (for example COM_RADIO_SET_HZ). Returns false if the simulator isn't connected.</summary>
+        public bool SendEvent(string name, uint data) {
+            if (!_connected) return false;
+            int i = Array.IndexOf(EventNames, name);
+            if (i < 0) return false;
+            _outbox.Enqueue(new KeyValuePair<uint, uint>(EventBaseId + (uint)i, data));
+            return true;
+        }
+
+        // ---------------------------------------------------------------- background loop
+
+        private void Loop() {
+            while (!_stop) {
+                try {
+                    if (!_connected) TryOpen(); else { SendQueued(); Pump(); CheckExt(); RaiseTick(); }
+                } catch (Exception ex) {
+                    if (IsMissingNative(ex)) { _log("[SimConnect] SimConnect.dll became unavailable. Telemetry stopped."); return; }
+                    _log("[SimConnect] " + ex.Message);
+                    try { Disconnect(true); } catch { }
+                }
+                if (_stopEvt.WaitOne(_connected ? 200 : 5000)) return;
+            }
+        }
+
+        private void RaiseTick() {
+            try { var t = Tick; if (t != null) t(); } catch (Exception ex) { _log("[SimConnect] Tick handler error: " + ex.Message); }
+        }
+
+        private static bool IsMissingNative(Exception ex) {
+            return ex is DllNotFoundException || ex is BadImageFormatException || ex is TypeLoadException ||
+                   ex is EntryPointNotFoundException || ex is FileNotFoundException || ex is FileLoadException;
+        }
+
+        private bool TryOpen() {
+            IntPtr h;
+            int hr = Native.SimConnect_Open(out h, "VBuddy", IntPtr.Zero, 0, IntPtr.Zero, 0);
+            if (hr != 0 || h == IntPtr.Zero) {
+                if (!_loggedWaiting) { _loggedWaiting = true; _log("[SimConnect] Waiting for the simulator to start..."); }
+                return false;
+            }
+            if (!Define(h, CoreDef, CoreVars)) { Native.SimConnect_Close(h); return false; }
+            Define(h, ExtDef, ExtVars);   // best effort
+            if (Native.SimConnect_RequestDataOnSimObject(h, CoreReq, CoreDef, 0, PeriodSecond, 0, 0, 0, 0) != 0) { Native.SimConnect_Close(h); return false; }
+            Native.SimConnect_RequestDataOnSimObject(h, ExtReq, ExtDef, 0, PeriodSecond, 0, 0, 0, 0);
+
+            for (int i = 0; i < EventNames.Length; i++)
+                Native.SimConnect_MapClientEventToSimEvent(h, EventBaseId + (uint)i, EventNames[i]);
+            Native.SimConnect_SubscribeToSystemEvent(h, EvPause, "Pause");
+            Native.SimConnect_SubscribeToSystemEvent(h, EvCrashed, "Crashed");
+
+            _h = h; _connected = true; _fast = false; _loggedWaiting = false; _extWarned = false;
+            _ext = null; _extUtc = DateTime.MinValue; _connectedUtc = DateTime.UtcNow;
+            _log("[SimConnect] Connected to the simulator.");
+            return true;
+        }
+
+        private bool Define(IntPtr h, uint defId, string[][] vars) {
+            for (uint i = 0; i < vars.Length; i++) {
+                int hr = Native.SimConnect_AddToDataDefinition(h, defId, vars[i][0], vars[i][1], TypeFloat64, 0f, Unused);
+                if (hr != 0) { _log("[SimConnect] The simulator rejected '" + vars[i][0] + "'."); return false; }
+            }
+            return true;
+        }
+
+        private void Disconnect(bool announce) {
+            IntPtr h = _h;
+            _h = IntPtr.Zero;
+            bool was = _connected;
+            _connected = false; _fast = false;
+            KeyValuePair<uint, uint> junk; while (_outbox.TryDequeue(out junk)) { }
+            if (h != IntPtr.Zero) { try { Native.SimConnect_Close(h); } catch { } }
+            if (was && announce && !_stop) _log("[SimConnect] Disconnected. Will reconnect when the simulator is available.");
+            _loggedWaiting = true;   // don't repeat the "waiting" line
+        }
+
+        private void SendQueued() {
+            KeyValuePair<uint, uint> e;
+            int guard = 0;
+            while (guard++ < 20 && _connected && _outbox.TryDequeue(out e)) {
+                // GROUPID_IS_PRIORITY (0x10) with priority 1 (highest): no notification group needed.
+                Native.SimConnect_TransmitClientEvent(_h, 0, e.Key, e.Value, 1, 0x00000010);
+            }
+        }
+
+        private void Pump() {
+            for (int guard = 0; guard < 600 && _connected; guard++) {
+                IntPtr p; uint cb;
+                int hr = Native.SimConnect_GetNextDispatch(_h, out p, out cb);
+                if (hr != 0 || p == IntPtr.Zero) return;          // nothing queued
+                int id = Marshal.ReadInt32(p, 8);
+                if (id == RecvQuit) { Raise("Quit", 0); Disconnect(true); return; }
+                if (id == RecvException) { _log("[SimConnect] Simulator reported error code " + Marshal.ReadInt32(p, 12) + " (parameter " + Marshal.ReadInt32(p, 20) + ")."); continue; }
+                if (id == RecvEvent) {
+                    uint evt = (uint)Marshal.ReadInt32(p, 16), data = (uint)Marshal.ReadInt32(p, 20);
+                    if (evt == EvPause) Raise("Pause", data); else if (evt == EvCrashed) Raise("Crashed", data);
+                    continue;
+                }
+                if (id == RecvSimObjectData) HandleData(p);
+            }
+        }
+
+        private void Raise(string name, uint data) {
+            try { var h = SimEvent; if (h != null) h(name, data); } catch (Exception ex) { _log("[SimConnect] Event handler error: " + ex.Message); }
+        }
+
+        // If the extended variables never arrive, say so once and carry on with the core set.
+        private void CheckExt() {
+            if (_extWarned || _ext != null) return;
+            if ((DateTime.UtcNow - _connectedUtc).TotalSeconds > 12) {
+                _extWarned = true;
+                _log("[SimConnect] The extended variables (fuel, engines, warnings, wind, radios) were not delivered. " +
+                     "Position-based features still work; fuel, engine and cockpit alerts are off.");
+            }
+        }
+
+        private static double[] ReadDoubles(IntPtr p, int count) {
+            var d = new double[count];
+            for (int i = 0; i < count; i++) d[i] = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(p, 40 + 8 * i));
+            return d;
+        }
+
+        private void HandleData(IntPtr p) {
+            // SIMCONNECT_RECV_SIMOBJECT_DATA: request id at 12, define count at 36, values from offset 40.
+            uint req = (uint)Marshal.ReadInt32(p, 12);
+            int count = Marshal.ReadInt32(p, 36);
+
+            if (req == ExtReq) {
+                if (count >= ExtVars.Length) { _ext = ReadDoubles(p, ExtVars.Length); _extUtc = DateTime.UtcNow; }
+                return;
+            }
+            if (req != CoreReq || count < CoreVars.Length) return;
+
+            double[] d = ReadDoubles(p, CoreVars.Length);
+            var s = new SimSample {
+                Utc = DateTime.UtcNow, AltFt = d[0], GsKt = d[1], OnGround = d[2] > 0.5, VsFpm = d[3],
+                Lat = d[4], Lon = d[5], AglFt = d[6], TouchdownFps = d[7], HdgTrue = d[8]
+            };
+
+            double[] e = _ext;
+            if (e != null && (s.Utc - _extUtc).TotalSeconds < 5) {
+                s.HasExt = true;
+                s.FuelLbs = e[0];
+                s.FuelFlowPph = Math.Max(0, e[1]) + Math.Max(0, e[2]) + Math.Max(0, e[3]) + Math.Max(0, e[4]);
+                for (int i = 0; i < 4; i++) if (e[5 + i] > 0.5) s.EnginesRunning |= (1 << i);
+                s.Stall = e[9] > 0.5; s.Overspeed = e[10] > 0.5;
+                s.GearDown = e[11] > 0.5; s.GearRetractable = e[12] > 0.5;
+                s.FlapsIndex = (int)Math.Round(e[13]);
+                s.QnhHpa = e[14]; s.WindDir = e[15]; s.WindKt = e[16]; s.TempC = e[17];
+                s.Com1Mhz = e[18]; s.Com2Mhz = e[19];
+                s.NumEngines = (int)Math.Round(e[20]);
+                s.ParkingBrake = e[21] > 0.5;
+                s.IasKt = e[22];
+            }
+
+            // Sample at frame rate while close to the ground so the touchdown rate is accurate; once a second otherwise.
+            bool wantFast = !s.OnGround && s.AglFt < 250;
+            if (wantFast != _fast) {
+                _fast = wantFast;
+                Native.SimConnect_RequestDataOnSimObject(_h, CoreReq, CoreDef, 0, wantFast ? PeriodSimFrame : PeriodSecond, 0, 0, wantFast ? 2u : 0u, 0);
+            }
+
+            try { if (_onSample != null) _onSample(s); } catch (Exception ex) { _log("[SimConnect] Sample handler error: " + ex.Message); }
+        }
+
+        // ---------------------------------------------------------------- locating SimConnect.dll
+
+        private void PreloadNative() {
+            var list = new List<string>();
+            if (!string.IsNullOrEmpty(_dllPath)) list.Add(Directory.Exists(_dllPath) ? Path.Combine(_dllPath, "SimConnect.dll") : _dllPath);
+            if (!string.IsNullOrEmpty(_dir)) list.Add(Path.Combine(_dir, "SimConnect.dll"));
+            foreach (string env in new[] { "MSFS2024_SDK", "MSFS_SDK" }) {
+                string v = Environment.GetEnvironmentVariable(env);
+                if (!string.IsNullOrEmpty(v)) list.Add(Path.Combine(v, "SimConnect SDK", "lib", "SimConnect.dll"));
+            }
+            list.Add(@"C:\MSFS 2024 SDK\SimConnect SDK\lib\SimConnect.dll");
+            list.Add(@"C:\MSFS SDK\SimConnect SDK\lib\SimConnect.dll");
+
+            foreach (string c in list) {
+                if (!File.Exists(c)) continue;
+                if (Native.LoadLibrary(c) != IntPtr.Zero) { _log("[SimConnect] Using " + c); return; }
+                _log("[SimConnect] Found " + c + " but Windows could not load it (wrong bitness?).");
+            }
+            // Otherwise fall back to the normal Windows DLL search.
+        }
+
+        // ---------------------------------------------------------------- native API
+
+        private static class Native {
+            private const string Dll = "SimConnect.dll";
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibrary(string path);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_Open(out IntPtr phSimConnect, [MarshalAs(UnmanagedType.LPStr)] string szName,
+                IntPtr hWnd, uint userEventWin32, IntPtr hEventHandle, uint configIndex);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_Close(IntPtr hSimConnect);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_AddToDataDefinition(IntPtr hSimConnect, uint defineId,
+                [MarshalAs(UnmanagedType.LPStr)] string datumName, [MarshalAs(UnmanagedType.LPStr)] string unitsName,
+                uint datumType, float epsilon, uint datumId);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_RequestDataOnSimObject(IntPtr hSimConnect, uint requestId, uint defineId,
+                uint objectId, uint period, uint flags, uint origin, uint interval, uint limit);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_GetNextDispatch(IntPtr hSimConnect, out IntPtr ppData, out uint pcbData);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_MapClientEventToSimEvent(IntPtr hSimConnect, uint eventId,
+                [MarshalAs(UnmanagedType.LPStr)] string eventName);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_TransmitClientEvent(IntPtr hSimConnect, uint objectId, uint eventId,
+                uint data, uint groupId, uint flags);
+
+            [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+            public static extern int SimConnect_SubscribeToSystemEvent(IntPtr hSimConnect, uint eventId,
+                [MarshalAs(UnmanagedType.LPStr)] string systemEventName);
+        }
+    }
+}
