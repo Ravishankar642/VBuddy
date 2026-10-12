@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Replacement for the original VBuddy.csproj so the plugin can be built with:
+        dotnet build VBuddy.csproj -c Release
+    Output: bin\Release\VBuddy.dll
+
+    All .cs files in this folder (including Main.TelegramControl.cs) are included
+    automatically - no list to maintain.
+
+    ONLY THING YOU MAY NEED TO EDIT: the HintPath below, if vPilot is not installed
+    in %LocalAppData%\vPilot.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>VBuddy</AssemblyName>
+    <RootNamespace>VBuddy</RootNamespace>
+    <OutputType>Library</OutputType>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <SignAssembly>false</SignAssembly>
+    <!-- The repo already has Properties\AssemblyInfo.cs; don't generate a second one. -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <!-- Put the DLL in bin\Release\ instead of bin\Release\net48\ -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- vPilot's own plugin SDK. Private=False stops it being copied next to VBuddy.dll
+         (a copy of this file inside the Plugins folder breaks vPilot plugins). -->
+    <Reference Include="RossCarlson.Vatsim.Vpilot.Plugins">
+      <HintPath>$(LOCALAPPDATA)\vPilot\RossCarlson.Vatsim.Vpilot.Plugins.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,6 @@
+.vs/
+bin/Debug/*
+bin/Release/*
+obj/*
+!bin/Debug/VBuddy.ini
+!bin/Release/VBuddy.ini

@@ -1,0 +1,59 @@
+# Telegram Control
+
+Control vPilot from your Telegram bot, and get connect/broadcast notices there.
+Private messages, radio, SELCAL, disconnect and Hoppie relaying are already handled by
+VBuddy's normal notifier; this feature adds the **two-way** part.
+
+## Setup
+
+1. Create a bot and get your `BotToken` and `ChatId` (see [telegram.md](telegram.md)).
+2. Add to `VBuddy.ini`:
+
+```ini
+[Telegram]
+BotToken="123456:ABC-your-token"
+ChatId="123456789"
+
+[TelegramControl]
+Enabled=true
+RelayBroadcast=true
+NotifyConnect=true
+NotifyDisconnect=false
+```
+
+`[TelegramControl]` reuses the `[Telegram]` credentials. You can override them by adding
+`BotToken` / `ChatId` under `[TelegramControl]` (e.g. to use a separate bot).
+
+3. Restart vPilot. You should get "VBuddy Telegram control is online."
+
+## Commands
+
+| Command | Action |
+| --- | --- |
+| `/status` | Shows whether you're connected, and as which callsign |
+| `/connect` | Connects using the last callsign / aircraft / SELCAL used in vPilot |
+| `/connect CALLSIGN TYPECODE [SELCAL]` | Connects with explicit details |
+| `/disconnect` | Disconnects from the network |
+| `/msg CALLSIGN text` | Sends a private message |
+| `/help` | Lists commands |
+
+## Settings
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `Enabled` | `false` | Master switch |
+| `RelayBroadcast` | `true` | Forward network broadcast messages |
+| `NotifyConnect` | `true` | Send a message when you connect |
+| `NotifyDisconnect` | `false` | Send a message when you disconnect (leave off if `[Disconnect]` already does this) |
+
+## Security
+
+- Commands are only accepted from the configured `ChatId`. Anyone else messaging the bot is ignored silently.
+- Treat the bot token like a password. If it leaks, revoke it in @BotFather with `/revoke`.
+- Commands queued while vPilot was closed are discarded at startup, so an old `/disconnect` can't fire later.
+
+## Notes
+
+- Telegram allows only one program to poll a bot at a time. If another app (or a webhook)
+  uses the same bot you'll see a "409" message in the vPilot debug window; use a dedicated bot.
+- Your identity is remembered in `VBuddy.identity` next to `VBuddy.dll`.

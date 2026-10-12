@@ -1,0 +1,284 @@
+// TelegramControl.Autopilot.cs  -  /alt /spd /hdg and /ap /lnav /vnav through per-aircraft profiles.
+//
+// How it works: VBuddy reads the aircraft title from the simulator, picks the first profile in
+// VBuddy.aircraft.ini whose Match words appear in it, and runs that profile's action for the command.
+// An action is either
+//     event:NAME[:DATA]   a SimConnect event (NAME may be #12345 for an add-on's custom event ID), or
+//     rpn:CODE            RPN code run through the MobiFlight WASM module (L-vars, H-events, K-events).
+// {v} in DATA or CODE is replaced by the value you sent. Needs [SimConnect] Enabled=true.
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+
+namespace VBuddy {
+
+    internal sealed partial class TelegramControlSettings {
+        public bool ApControl = true;    // allow /alt /spd /hdg /ap /lnav /vnav
+
+        internal void LoadAutopilot(IniFile ini) {
+            ApControl = RB(ini, "SimConnect", "ApControl", true);
+        }
+    }
+
+    // One aircraft profile from VBuddy.aircraft.ini.
+    internal sealed class ApProfile {
+        public string Id = "", Name = "", Verify = "none", Notes = "";
+        public string[] Match = new string[0];
+        public readonly Dictionary<string, string> Actions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public string Get(string key) { string v; return Actions.TryGetValue(key, out v) && v.Length > 0 ? v : null; }
+        public bool Matches(string title) {
+            if (string.IsNullOrEmpty(title)) return false;
+            foreach (string m in Match)
+                if (m.Length > 0 && title.IndexOf(m, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
+        }
+    }
+
+    internal static class ApProfiles {
+
+        private static readonly string[] ActionKeys = {
+            "Alt", "Spd", "Hdg", "ApOn", "ApOff", "ApToggle", "LnavOn", "LnavOff", "LnavToggle", "VnavOn", "VnavOff", "VnavToggle"
+        };
+
+        // Minimal INI reader (sections -> keys), tolerant of comments and blank values.
+        private static Dictionary<string, Dictionary<string, string>> Parse(string text) {
+            var all = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> cur = null;
+            foreach (string raw in text.Replace("\r\n", "\n").Split(new[] { '\n' })) {
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith(";") || line.StartsWith("#")) continue;
+                if (line.StartsWith("[") && line.EndsWith("]")) {
+                    cur = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    all[line.Substring(1, line.Length - 2).Trim()] = cur;
+                    continue;
+                }
+                int eq = line.IndexOf('=');
+                if (cur == null || eq <= 0) continue;
+                cur[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+            }
+            return all;
+        }
+
+        public static List<ApProfile> Load(string path, Action<string> log) {
+            var list = new List<ApProfile>();
+            try {
+                if (File.Exists(path)) list = FromText(File.ReadAllText(path));
+                else log("[Autopilot] VBuddy.aircraft.ini was not found. Using the standard autopilot events only.");
+            } catch (Exception ex) { log("[Autopilot] Couldn't read VBuddy.aircraft.ini: " + ex.Message); }
+            if (list.Count == 0) list = FromText(Builtin);
+            return list;
+        }
+
+        public static List<ApProfile> FromText(string text) {
+            var all = Parse(text);
+            var list = new List<ApProfile>();
+            Dictionary<string, string> p;
+            string order = all.TryGetValue("Profiles", out p) && p.ContainsKey("List") ? p["List"] : "";
+            foreach (string idRaw in order.Split(',')) {
+                string id = idRaw.Trim();
+                Dictionary<string, string> sec;
+                if (id.Length == 0 || !all.TryGetValue(id, out sec)) continue;
+                var pr = new ApProfile { Id = id };
+                string v;
+                pr.Name = sec.TryGetValue("Name", out v) && v.Length > 0 ? v : id;
+                if (sec.TryGetValue("Verify", out v)) pr.Verify = v.ToLowerInvariant();
+                if (sec.TryGetValue("Notes", out v)) pr.Notes = v;
+                if (sec.TryGetValue("Match", out v)) {
+                    var m = new List<string>();
+                    foreach (string w in v.Split(',')) if (w.Trim().Length > 0) m.Add(w.Trim());
+                    pr.Match = m.ToArray();
+                }
+                foreach (string k in ActionKeys) if (sec.TryGetValue(k, out v) && v.Length > 0) pr.Actions[k] = v;
+                list.Add(pr);
+            }
+            return list;
+        }
+
+        // Used only if the profile file is missing or empty.
+        public const string Builtin =
+            "[Profiles]\nList=STANDARD\n[STANDARD]\nName=Standard autopilot events\nMatch=\nVerify=standard\n" +
+            "Alt=event:AP_ALT_VAR_SET_ENGLISH:{v}\nSpd=event:AP_SPD_VAR_SET:{v}\nHdg=event:HEADING_BUG_SET:{v}\n" +
+            "ApOn=event:AUTOPILOT_ON\nApOff=event:AUTOPILOT_OFF\nLnavOn=event:AP_NAV1_HOLD_ON\nLnavOff=event:AP_NAV1_HOLD_OFF\n";
+    }
+
+    internal sealed partial class TelegramControl {
+
+        private List<ApProfile> _profiles = new List<ApProfile>();
+
+        private void LoadProfiles() {
+            _profiles = ApProfiles.Load(Path.Combine(_dir, "VBuddy.aircraft.ini"), _log);
+        }
+
+        private ApProfile CurrentProfile() { return ProfileFor(_sim != null ? _sim.Title : ""); }
+
+        private ApProfile ProfileFor(string title) {
+            ApProfile fallback = null;
+            foreach (ApProfile p in _profiles) {
+                if (p.Match.Length == 0) { if (fallback == null) fallback = p; continue; }
+                if (p.Matches(title)) return p;
+            }
+            return fallback;
+        }
+
+        private string ApGate() {
+            if (!_s.ApControl) return "Autopilot commands are switched off ([SimConnect] ApControl=false, or the button in /settings).";
+            return RemoteGate();
+        }
+
+        // ------------------------------------------------------ running an action
+
+        // Returns null on success or a reason it couldn't be sent.
+        private string RunAction(string action, double value) {
+            if (action == null) return "no action";
+            int colon = action.IndexOf(':');
+            if (colon < 0) return "malformed action \"" + action + "\"";
+            string kind = action.Substring(0, colon).Trim().ToLowerInvariant();
+            string rest = action.Substring(colon + 1).Trim();
+            string v = ((long)Math.Round(value)).ToString(CultureInfo.InvariantCulture);
+
+            if (kind == "event") {
+                string name = rest, data = "{v}";
+                int c2 = rest.IndexOf(':');
+                if (c2 > 0) { name = rest.Substring(0, c2).Trim(); data = rest.Substring(c2 + 1).Trim(); }
+                data = data.Replace("{v}", v);
+                long d;
+                if (!long.TryParse(data, NumberStyles.Integer, CultureInfo.InvariantCulture, out d) || d < 0 || d > uint.MaxValue)
+                    d = 0;
+                return _sim.SendEvent(name, (uint)d) ? null : "the simulator isn't connected";
+            }
+            if (kind == "rpn") {
+                string code = rest.Replace("{v}", v);
+                return _sim.SendWasm("MF.SimVars.Set." + code) ? null : "the simulator isn't connected";
+            }
+            return "unknown action type \"" + kind + "\"";
+        }
+
+        private static readonly string NoMapping =
+            "This aircraft has no mapping for that yet. Add it to the matching section of VBuddy.aircraft.ini " +
+            "(codes for most add-ons are on MobiFlight's HubHop).";
+
+        // ------------------------------------------------------ /alt /spd /hdg
+
+        private static bool ParseAlt(string s, out int ft, out string err) {
+            ft = 0; err = null;
+            var m = Regex.Match(s.Trim(), @"^(fl)?\s*(\d{1,5})$", RegexOptions.IgnoreCase);
+            if (!m.Success) { err = "Use feet or a flight level:  /alt 35000   or   /alt FL350"; return false; }
+            int n = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+            if (m.Groups[1].Success) n *= 100;
+            else if (n < 1000 && n != 0) { err = "Did you mean FL" + n.ToString("000") + "?  Send  /alt FL" + n.ToString("000") + "  or  /alt " + (n * 100); return false; }
+            n = (int)(Math.Round(n / 100.0) * 100);
+            if (n < 0 || n > 50000) { err = "Altitude must be between 0 and 50,000 ft."; return false; }
+            ft = n; return true;
+        }
+
+        private async Task<string> CmdApSet(string what, string[] parts)
+        {
+            string gate = ApGate(); if (gate != null) return gate;
+            if (parts.Length < 2) return "Usage:  /alt 35000  or  /alt FL350\n/spd 280  (knots)\n/hdg 270";
+
+            double v; string label, key, err = null; string unit;
+            if (what == "alt") {
+                int ft; if (!ParseAlt(parts[1], out ft, out err)) return err;
+                v = ft; label = "Altitude"; key = "Alt"; unit = " ft";
+            } else if (what == "hdg") {
+                int h; if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out h) || h < 0 || h > 360) return "Heading must be 1 to 360.";
+                if (h == 0) h = 360;
+                v = h; label = "Heading"; key = "Hdg"; unit = "\u00B0";
+            } else {
+                int k; if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out k) || k < 80 || k > 400)
+                    return "Speed must be 80 to 400 knots. (Mach isn't supported yet.)";
+                v = k; label = "Speed"; key = "Spd"; unit = " kt";
+            }
+
+            ApProfile p = CurrentProfile();
+            if (p == null) return "No aircraft profile is loaded.";
+            string action = p.Get(key);
+            if (action == null) return label + " can't be set on " + p.Name + ". " + NoMapping;
+
+            string fail = RunAction(action, v);
+            if (fail != null) return "Couldn't send that: " + fail + ".";
+
+            string shown = Num(v) + unit;
+            if (p.Verify != "standard") return "\u2705 " + label + " " + shown + " sent to the " + p.Name + ". I can't read this aircraft's panel, so check the " + (what == "alt" ? "MCP/FCU" : "MCP/FCU") + ".";
+
+            await Task.Delay(1800);
+            ApState ap = _sim.Ap;
+            if (ap == null) return "\u2705 " + label + " " + shown + " sent. I couldn't read it back to confirm.";
+            double now = what == "alt" ? (Math.Abs(ap.AltSel3 - v) < Math.Abs(ap.AltSel - v) ? ap.AltSel3 : ap.AltSel)
+                       : what == "hdg" ? ap.HdgSel : ap.SpdSel;
+            double diff = Math.Abs(now - v);
+            if (what == "hdg") diff = Math.Min(diff, 360 - diff);
+            double tol = what == "alt" ? 60 : 1.5;
+            if (diff <= tol) return "\u2705 " + label + " set to " + shown + ".";
+            return "Sent, but the aircraft still shows " + Num(now) + unit + ". This aircraft may ignore outside " + label.ToLowerInvariant() +
+                   " changes. Set it in the cockpit, or add a mapping in VBuddy.aircraft.ini.";
+        }
+
+        // ------------------------------------------------------ /ap /lnav /vnav
+
+        private async Task<string> CmdApMode(string what, string[] parts)
+        {
+            string gate = ApGate(); if (gate != null) return gate;
+            ApProfile p = CurrentProfile();
+            if (p == null) return "No aircraft profile is loaded.";
+
+            string arg = parts.Length > 1 ? parts[1].ToLowerInvariant() : "";
+            if (what == "ap" && arg.Length == 0) return ApStatus(p);
+            bool? on = arg == "on" || arg == "engage" || arg == "1" ? true : arg == "off" || arg == "disengage" || arg == "0" ? (bool?)false : null;
+            if (on == null) return "Usage:  /" + what + " on   or   /" + what + " off";
+
+            string prefix = what == "ap" ? "Ap" : what == "lnav" ? "Lnav" : "Vnav";
+            string label = what == "ap" ? "Autopilot" : what.ToUpperInvariant();
+            string direct = p.Get(prefix + (on.Value ? "On" : "Off"));
+            string toggle = p.Get(prefix + "Toggle");
+
+            if (direct == null && toggle == null) return label + " can't be switched on " + p.Name + ". " + NoMapping;
+
+            ApState before = _sim.Ap;
+            bool stateKnown = p.Verify == "standard" && what == "ap" && before != null;
+
+            if (direct == null) {
+                // Toggle-only button: only press it if we know it needs pressing.
+                if (stateKnown && before.Master == on.Value) return "\u2705 " + label + " is already " + (on.Value ? "on" : "off") + ".";
+                string fail = RunAction(toggle, 0);
+                if (fail != null) return "Couldn't send that: " + fail + ".";
+                if (!stateKnown)
+                    return "\u2705 " + label + " button pressed on the " + p.Name + ". It is a toggle and I can't read its state, " +
+                           "so check that it is " + (on.Value ? "ON" : "OFF") + " (send it again if not).";
+            } else {
+                string fail = RunAction(direct, 0);
+                if (fail != null) return "Couldn't send that: " + fail + ".";
+            }
+
+            if (what != "ap" || p.Verify != "standard") return "\u2705 " + label + " " + (on.Value ? "ON" : "OFF") + " sent to the " + p.Name + ".";
+
+            await Task.Delay(1800);
+            ApState ap = _sim.Ap;
+            if (ap == null) return "\u2705 " + label + " " + (on.Value ? "ON" : "OFF") + " sent. I couldn't read it back to confirm.";
+            if (ap.Master == on.Value) return "\u2705 " + label + " is " + (on.Value ? "on" : "off") + ".";
+            return "Sent, but the autopilot still reads " + (ap.Master ? "on" : "off") + ". This aircraft may ignore outside autopilot commands.";
+        }
+
+        private string ApStatus(ApProfile p) {
+            var sb = new StringBuilder("\uD83E\uDDED Autopilot\n");
+            string title = _sim != null ? _sim.Title : "";
+            sb.Append("Aircraft: ").Append(title.Length > 0 ? title : "unknown").Append("\nProfile: ").Append(p.Name).Append('\n');
+            ApState ap = _sim != null ? _sim.Ap : null;
+            if (ap != null && p.Verify == "standard")
+                sb.Append("AP ").Append(ap.Master ? "ON" : "OFF").Append("  \u00B7  ALT ").Append(Num(ap.AltSel)).Append("  \u00B7  HDG ").Append(Num(ap.HdgSel))
+                  .Append("\u00B0  \u00B7  SPD ").Append(Num(ap.SpdSel)).Append(" kt\n");
+            else sb.Append("This aircraft's panel can't be read back, only commanded.\n");
+            sb.Append("Can set:");
+            foreach (string k in new[] { "Alt", "Spd", "Hdg" }) if (p.Get(k) != null) sb.Append(' ').Append(k.ToLowerInvariant());
+            foreach (string k in new[] { "Ap", "Lnav", "Vnav" })
+                if (p.Get(k + "On") != null || p.Get(k + "Toggle") != null) sb.Append(' ').Append(k.ToLowerInvariant());
+            if (p.Notes.Length > 0) sb.Append('\n').Append(p.Notes);
+            return sb.ToString();
+        }
+    }
+}
