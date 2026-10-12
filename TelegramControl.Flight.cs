@@ -40,7 +40,10 @@ namespace VBuddy {
             LowFuelMinutes = RI(ini, S, "LowFuelMinutes", 30, 1, 600);
             PauseSeconds = RI(ini, S, "PauseSeconds", 30, 5, 600);
             TrackIntervalSeconds = RI(ini, S, "TrackIntervalSeconds", 20, 5, 300);
+<<<<<<< HEAD
             LoadAutopilot(ini);
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
         }
 
         private static int RI(IniFile ini, string section, string key, int def, int min, int max) {
@@ -86,7 +89,10 @@ namespace VBuddy {
             _togs.Add(new Tog { Id = "as", Label = "Stall / overspeed", Section = "SimConnect", Key = "AlertAirspeed", Get = () => _s.AlertAirspeed, Set = v => _s.AlertAirspeed = v });
             _togs.Add(new Tog { Id = "ap", Label = "Gear / flaps check", Section = "SimConnect", Key = "AlertApproach", Get = () => _s.AlertApproach, Set = v => _s.AlertApproach = v });
             _togs.Add(new Tog { Id = "ps", Label = "Sim paused", Section = "SimConnect", Key = "AlertPause", Get = () => _s.AlertPause, Set = v => _s.AlertPause = v });
+<<<<<<< HEAD
             _togs.Add(new Tog { Id = "ac", Label = "Autopilot commands", Section = "SimConnect", Key = "ApControl", Get = () => _s.ApControl, Set = v => _s.ApControl = v });
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             _togs.Add(new Tog { Id = "ph", Label = "Flight notices", Section = "SimConnect", Key = "PhaseNotices", Get = () => _s.PhaseNotices, Set = v => _s.PhaseNotices = v });
         }
 
@@ -385,7 +391,11 @@ namespace VBuddy {
 
         private string RemoteGate() {
             if (!_s.RemoteControl) return "Remote tuning is switched off ([SimConnect] RemoteControl=false).";
+<<<<<<< HEAD
             if (Io == null || !Io.Connected) return "Not connected to the simulator. SimConnect: " + SimState() + ".";
+=======
+            if (_sim == null || !_sim.Connected) return "Not connected to the simulator. SimConnect: " + SimState() + ".";
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             return null;
         }
 
@@ -459,7 +469,10 @@ namespace VBuddy {
                 return "No live simulator data. SimConnect: " + SimState() + ".";
 
             var sb = new StringBuilder("\uD83D\uDEE9 Live aircraft data\n");
+<<<<<<< HEAD
             if (_sim != null && _sim.Title.Length > 0) sb.Append(_sim.Title).Append('\n');
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             sb.Append("Altitude ").Append(TgFormat.Feet(s.AltFt)).Append("  (").Append(TgFormat.Feet(s.AglFt)).Append(" AGL)\n");
             sb.Append(s.HasExt ? "IAS " + Num(s.IasKt) + " kt  \u00B7  " : "").Append("GS ").Append(Num(s.GsKt)).Append(" kt  \u00B7  VS ").Append(Num(s.VsFpm)).Append(" fpm\n");
             sb.Append("Heading ").Append(TgFormat.Heading(s.HdgTrue)).Append(" true  \u00B7  ").Append(s.OnGround ? "on the ground" : "airborne").Append('\n');

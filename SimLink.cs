@@ -14,9 +14,13 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+<<<<<<< HEAD
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+=======
+using System.Threading;
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
 
 namespace VBuddy {
 
@@ -46,6 +50,7 @@ namespace VBuddy {
         public double IasKt;
     }
 
+<<<<<<< HEAD
     // What the simulator's standard autopilot variables say (updated about once a second).
     internal sealed class ApState {
         public DateTime Utc;
@@ -66,6 +71,8 @@ namespace VBuddy {
         Task<double?> ReadAsync(string datum, string units, int timeoutMs);
     }
 
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
     internal static class SimLinkHost {
 
         // Never throws. Returns null when SimConnect can't be used.
@@ -91,16 +98,23 @@ namespace VBuddy {
         }
     }
 
+<<<<<<< HEAD
     internal sealed class SimLink : IDisposable, ISimIo {
+=======
+    internal sealed class SimLink : IDisposable {
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
 
         private const uint CoreDef = 1, CoreReq = 1, ExtDef = 2, ExtReq = 2, Unused = 0xFFFFFFFF;
         private const uint PeriodSimFrame = 3, PeriodSecond = 4;
         private const uint TypeFloat64 = 4;
         private const int RecvException = 1, RecvQuit = 3, RecvEvent = 4, RecvSimObjectData = 8;
         private const uint EvPause = 200, EvCrashed = 201;
+<<<<<<< HEAD
         private const uint ApDef = 3, ApReq = 3, TitleDef = 4, TitleReq = 4, WasmDef = 5, WasmDataId = 5000;
         private const uint TypeString256 = 9;
         private const int WasmSize = 1024;
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
 
         // The order here is the order of the doubles in the reply.
         private static readonly string[][] CoreVars = {
@@ -142,6 +156,7 @@ namespace VBuddy {
             new[] { "AIRSPEED INDICATED", "knots" }                    // 22
         };
 
+<<<<<<< HEAD
         // Standard autopilot variables (requested separately from everything else).
         private static readonly string[][] ApVars = {
             new[] { "AUTOPILOT MASTER", "bool" },
@@ -151,11 +166,20 @@ namespace VBuddy {
             new[] { "AUTOPILOT ALTITUDE LOCK VAR:3", "feet" },
             new[] { "AUTOPILOT NAV1 LOCK", "bool" }
         };
+=======
+        // Key events we can send (name -> client event id).
+        private static readonly string[] EventNames = {
+            "COM_RADIO_SET_HZ", "COM2_RADIO_SET_HZ", "COM_STBY_RADIO_SET_HZ", "COM2_STBY_RADIO_SET_HZ",
+            "COM_STBY_RADIO_SWAP", "COM2_RADIO_SWAP", "XPNDR_SET"
+        };
+        private const uint EventBaseId = 100;
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
 
         private readonly string _dllPath, _dir;
         private readonly Action<string> _log;
         private readonly Action<SimSample> _onSample;
         private readonly ManualResetEvent _stopEvt = new ManualResetEvent(false);
+<<<<<<< HEAD
         private readonly ConcurrentQueue<KeyValuePair<string, uint>> _outbox = new ConcurrentQueue<KeyValuePair<string, uint>>();
         private readonly ConcurrentQueue<string> _wasmBox = new ConcurrentQueue<string>();
         private readonly Dictionary<string, uint> _evIds = new Dictionary<string, uint>();
@@ -169,6 +193,9 @@ namespace VBuddy {
         private int _reqCounter = 1000;
         private volatile ApState _ap;
         private volatile string _title = "";
+=======
+        private readonly ConcurrentQueue<KeyValuePair<uint, uint>> _outbox = new ConcurrentQueue<KeyValuePair<uint, uint>>();
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
         private Thread _thread;
         private IntPtr _h = IntPtr.Zero;
         private volatile bool _connected, _stop;
@@ -183,10 +210,13 @@ namespace VBuddy {
         public event Action<string, uint> SimEvent;
 
         public bool Connected { get { return _connected; } }
+<<<<<<< HEAD
         /// <summary>Latest standard autopilot values, or null if the simulator hasn't delivered them.</summary>
         public ApState Ap { get { return _ap; } }
         /// <summary>The loaded aircraft's title (e.g. "PMDG 737-800 ..."), or empty.</summary>
         public string Title { get { return _title; } }
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
 
         public SimLink(string dllPath, string pluginDir, Action<string> log, Action<SimSample> onSample) {
             _dllPath = dllPath; _dir = pluginDir; _log = log; _onSample = onSample;
@@ -206,6 +236,7 @@ namespace VBuddy {
             try { Disconnect(false); } catch { }
         }
 
+<<<<<<< HEAD
         /// <summary>
         /// Queues a key event. NAME can be a standard event ("AP_MASTER") or "#12345" for an add-on's custom event ID.
         /// Returns false if the simulator isn't connected.
@@ -238,6 +269,17 @@ namespace VBuddy {
             if (_reads.TryRemove(req, out x)) x.TrySetResult(null);
         }
 
+=======
+        /// <summary>Queues a key event (for example COM_RADIO_SET_HZ). Returns false if the simulator isn't connected.</summary>
+        public bool SendEvent(string name, uint data) {
+            if (!_connected) return false;
+            int i = Array.IndexOf(EventNames, name);
+            if (i < 0) return false;
+            _outbox.Enqueue(new KeyValuePair<uint, uint>(EventBaseId + (uint)i, data));
+            return true;
+        }
+
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
         // ---------------------------------------------------------------- background loop
 
         private void Loop() {
@@ -274,16 +316,24 @@ namespace VBuddy {
             if (Native.SimConnect_RequestDataOnSimObject(h, CoreReq, CoreDef, 0, PeriodSecond, 0, 0, 0, 0) != 0) { Native.SimConnect_Close(h); return false; }
             Native.SimConnect_RequestDataOnSimObject(h, ExtReq, ExtDef, 0, PeriodSecond, 0, 0, 0, 0);
 
+<<<<<<< HEAD
             if (Define(h, ApDef, ApVars))
                 Native.SimConnect_RequestDataOnSimObject(h, ApReq, ApDef, 0, PeriodSecond, 0, 0, 0, 0);
             if (Native.SimConnect_AddToDataDefinition(h, TitleDef, "TITLE", null, TypeString256, 0f, Unused) == 0)
                 Native.SimConnect_RequestDataOnSimObject(h, TitleReq, TitleDef, 0, PeriodSecond, 0, 0, 9, 0);
+=======
+            for (int i = 0; i < EventNames.Length; i++)
+                Native.SimConnect_MapClientEventToSimEvent(h, EventBaseId + (uint)i, EventNames[i]);
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             Native.SimConnect_SubscribeToSystemEvent(h, EvPause, "Pause");
             Native.SimConnect_SubscribeToSystemEvent(h, EvCrashed, "Crashed");
 
             _h = h; _connected = true; _fast = false; _loggedWaiting = false; _extWarned = false;
             _ext = null; _extUtc = DateTime.MinValue; _connectedUtc = DateTime.UtcNow;
+<<<<<<< HEAD
             _evIds.Clear(); _nextEv = 300; _wasmReady = false; _ap = null; _title = "";
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             _log("[SimConnect] Connected to the simulator.");
             return true;
         }
@@ -301,17 +351,22 @@ namespace VBuddy {
             _h = IntPtr.Zero;
             bool was = _connected;
             _connected = false; _fast = false;
+<<<<<<< HEAD
             KeyValuePair<string, uint> junk; while (_outbox.TryDequeue(out junk)) { }
             string junk2; while (_wasmBox.TryDequeue(out junk2)) { }
             ReadReq junk3; while (_readBox.TryDequeue(out junk3)) { }
             foreach (uint k in new List<uint>(_reads.Keys)) FailRead(k);
             _readDefs.Clear();
+=======
+            KeyValuePair<uint, uint> junk; while (_outbox.TryDequeue(out junk)) { }
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             if (h != IntPtr.Zero) { try { Native.SimConnect_Close(h); } catch { } }
             if (was && announce && !_stop) _log("[SimConnect] Disconnected. Will reconnect when the simulator is available.");
             _loggedWaiting = true;   // don't repeat the "waiting" line
         }
 
         private void SendQueued() {
+<<<<<<< HEAD
             KeyValuePair<string, uint> e;
             int guard = 0;
             while (guard++ < 20 && _connected && _outbox.TryDequeue(out e)) {
@@ -363,6 +418,14 @@ namespace VBuddy {
                 Marshal.Copy(bytes, 0, buf, bytes.Length);
                 Native.SimConnect_SetClientData(_h, WasmDataId, WasmDef, 0, 0, (uint)WasmSize, buf);
             } finally { Marshal.FreeHGlobal(buf); }
+=======
+            KeyValuePair<uint, uint> e;
+            int guard = 0;
+            while (guard++ < 20 && _connected && _outbox.TryDequeue(out e)) {
+                // GROUPID_IS_PRIORITY (0x10) with priority 1 (highest): no notification group needed.
+                Native.SimConnect_TransmitClientEvent(_h, 0, e.Key, e.Value, 1, 0x00000010);
+            }
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
         }
 
         private void Pump() {
@@ -407,6 +470,7 @@ namespace VBuddy {
             uint req = (uint)Marshal.ReadInt32(p, 12);
             int count = Marshal.ReadInt32(p, 36);
 
+<<<<<<< HEAD
             if (req >= 1000) {
                 TaskCompletionSource<double?> pending;
                 if (_reads.TryRemove(req, out pending)) pending.TrySetResult(count >= 1 ? (double?)ReadDoubles(p, 1)[0] : null);
@@ -423,6 +487,8 @@ namespace VBuddy {
                 try { _title = (Marshal.PtrToStringAnsi(IntPtr.Add(p, 40)) ?? "").Trim(); } catch { }
                 return;
             }
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             if (req == ExtReq) {
                 if (count >= ExtVars.Length) { _ext = ReadDoubles(p, ExtVars.Length); _extUtc = DateTime.UtcNow; }
                 return;
@@ -518,6 +584,7 @@ namespace VBuddy {
                 uint data, uint groupId, uint flags);
 
             [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+<<<<<<< HEAD
             public static extern int SimConnect_MapClientDataNameToID(IntPtr hSimConnect,
                 [MarshalAs(UnmanagedType.LPStr)] string clientDataName, uint clientDataId);
 
@@ -530,6 +597,8 @@ namespace VBuddy {
                 uint flags, uint reserved, uint unitSize, IntPtr data);
 
             [DllImport(Dll, CallingConvention = CallingConvention.StdCall)]
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             public static extern int SimConnect_SubscribeToSystemEvent(IntPtr hSimConnect, uint eventId,
                 [MarshalAs(UnmanagedType.LPStr)] string systemEventName);
         }

@@ -345,7 +345,10 @@ namespace VBuddy {
 
             AddFlightToggles();
 
+<<<<<<< HEAD
             LoadProfiles();
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             SimBriefPlan.LoadCached(_briefPath, _log);
 
             if (_s.SimEnabled) {

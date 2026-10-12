@@ -147,6 +147,7 @@ namespace VBuddy {
             new[] { "sim", "Live aircraft data from the simulator" },
             new[] { "tune", "Tune COM1 or COM2 (frequency or controller)" },
             new[] { "squawk", "Set the transponder code" },
+<<<<<<< HEAD
             new[] { "alt", "Set autopilot altitude (35000, FL350, +1000)" },
             new[] { "pushalt", "Airbus: push ALT knob (managed climb/descent)" },
             new[] { "pullalt", "Airbus: pull ALT knob (open climb/descent)" },
@@ -159,6 +160,8 @@ namespace VBuddy {
             new[] { "ap", "Autopilot on/off or status" },
             new[] { "lnav", "LNAV on/off" },
             new[] { "vnav", "VNAV on/off" },
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
             new[] { "flightlog", "Current or last flight summary" },
             new[] { "track", "Send the flight track as a GPX file" },
             new[] { "settings", "Toggle alerts with buttons" },
@@ -595,6 +598,7 @@ namespace VBuddy {
                     if (cmd == "/tune2" && parts.Length == 2) parts = new[] { parts[0], parts[1], "2" };
                     return await CmdTune(parts);
 
+<<<<<<< HEAD
                 case "/alt":
                     return await CmdApSet("alt", parts);
 
@@ -629,6 +633,8 @@ namespace VBuddy {
                 case "/vnav":
                     return await CmdApMode("vnav", parts);
 
+=======
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
                 case "/squawk":
                 case "/xpdr":
                     return CmdSquawk(parts);
@@ -850,7 +856,11 @@ namespace VBuddy {
         }
 
         private string HelpText() {
+<<<<<<< HEAD
             return "VBuddy " + Main.Version + "  \u00B7  command list\n\n" +
+=======
+            return "VBuddy Telegram control\n\n" +
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
                    "INFO\n" +
                    "/where [CALLSIGN]  position, speed, heading\n" +
                    "/status  connection state\n" +
@@ -858,12 +868,21 @@ namespace VBuddy {
                    "/freq CALLSIGN  controller frequency\n" +
                    "/atis [ICAO]  ATIS text\n" +
                    "/metar [ICAO...]  weather\n" +
+<<<<<<< HEAD
                    "/fp  your SimBrief plan\n" +
+=======
+                   "/fp  your SimBrief plan (or /where for the filed one)\n" +
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
                    "/history [n]  recent messages\n" +
                    "/zulu  current Zulu time\n\n" +
                    "NETWORK\n" +
                    "/connect [CALLSIGN TYPE [SELCAL]]\n" +
+<<<<<<< HEAD
                    "/disconnect  (asks for /confirm)\n\n" +
+=======
+                   "/disconnect  (asks for /confirm)\n" +
+                   "\n" +
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
                    "COMMUNICATE\n" +
                    "/msg CALLSIGN text   /reply text\n" +
                    "/radio text  (on your transmit frequency)\n" +
@@ -872,6 +891,7 @@ namespace VBuddy {
                    "AIRCRAFT RADIO\n" +
                    "/ptt on|off   /ident   /modec on|off\n\n" +
                    "ALERTS\n" +
+<<<<<<< HEAD
                    "/watch PREFIX...   /unwatch PREFIX|all   /watchlist\n" +
                    "/listen on|off  forward all radio text\n" +
                    "/mute [minutes]   /unmute\n" +
@@ -896,6 +916,22 @@ namespace VBuddy {
                    "/pushhdg  managed (NAV)   /pullhdg  selected heading\n" +
                    "/pushspd  managed speed   /pullspd  selected speed\n\n" +
                    "Aircraft: PMDG 737/777, Fenix A320/A321, iniBuilds A350, iFly 737 MAX 8. Others use the standard autopilot events.";
+=======
+                   "/watch PREFIX...  alert when ATC comes online\n" +
+                   "/unwatch PREFIX|all   /watchlist\n" +
+                   "/listen on|off  forward all radio text\n" +
+                   "/mute [minutes]   /unmute\n" +
+                   "/settings  toggle alerts with buttons\n\n" +
+                   "SIMBRIEF AND SIM\n" +
+                   "/simbrief [name or ID]  load your latest OFP\n" +
+                   "/fileplan  OFP values to enter in vPilot\n" +
+                   "/sim  live aircraft data (needs SimConnect)\n\n" +
+                   "SIMULATOR CONTROL (needs SimConnect)\n" +
+                   "/tune 118.300 | /tune EGLL_TWR [2]  set COM1 (or COM2)\n" +
+                   "/squawk 1234  set the transponder code\n" +
+                   "/flightlog  current or last flight   /track  GPX track file\n\n" +
+                   "Not possible with vPilot: tuning COM frequencies or setting the squawk code.";
+>>>>>>> f12799e29048eb4a8793791c2344d1a851368c35
         }
 
         private string StatusText() {
